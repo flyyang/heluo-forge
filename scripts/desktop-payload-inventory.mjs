@@ -47,31 +47,53 @@ export class InventoryError extends Error {
 
 /**
  * Minimal electron-updater feed parser. The feeds are flat YAML with an
- * optional `files:` list whose entries are indented (and bulleted), so every
- * field regex accepts leading indentation and an optional `- ` bullet; only
- * the fields the inventory needs are extracted.
+ * optional `files:` list whose entries are indented (and bulleted). Long
+ * values — the base64 sha512 exceeds js-yaml's 80-column wrap — are folded
+ * block scalars (`sha512: >-` with the payload on the following line), so
+ * the getter unfolds `>`/`|` blocks before quotes are stripped.
  */
 export function parseUpdaterFeed(text, source = 'feed') {
-  const valuePattern = "^\\s*(?:-\\s*)?NAME:\\s*['\"]?([^'\"\\s]+)['\"]?\\s*$";
-  const field = (name) => new RegExp(valuePattern.replace('NAME', name), 'mu');
-  const version = field('version').exec(text);
-  const url = field('url').exec(text) ?? field('path').exec(text);
-  const sha512 = field('sha512').exec(text);
-  const size = /^\s*(?:-\s*)?size:\s*(\d+)\s*$/mu.exec(text);
-  const releaseDate = field('releaseDate').exec(text);
+  const lines = text.split(/\r?\n/u);
+  const unfoldBlockScalar = (startIndex, indicator) => {
+    const keyIndent = /^\s*/u.exec(lines[startIndex])[0].length;
+    const parts = [];
+    for (let index = startIndex + 1; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (line.trim() === '') {
+        parts.push('');
+        continue;
+      }
+      if (/^\s*/u.exec(line)[0].length <= keyIndent) break;
+      parts.push(line.trim());
+    }
+    while (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
+    return parts.join(indicator[0] === '|' ? '\n' : ' ');
+  };
+  const field = (name) => {
+    // Built by concatenation: the pattern interpolates the key name.
+    const pattern = new RegExp('^\\s*(?:-\\s*)?' + name + ':\\s*(.*)$', 'u');
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = pattern.exec(lines[index]);
+      if (!match) continue;
+      let value = match[1].trim();
+      if (/^[>|][+-]?\d*$/u.test(value)) value = unfoldBlockScalar(index, value);
+      return value.replace(/^['"]|['"]$/gu, '');
+    }
+    return null;
+  };
+  const version = field('version');
+  const url = field('url') ?? field('path');
+  const sha512 = field('sha512');
+  const sizeText = field('size');
+  const size = sizeText != null && /^\d+$/u.test(sizeText) ? Number(sizeText) : null;
+  const releaseDate = field('releaseDate');
   if (!version || !url || !sha512) {
     throw new InventoryError(
       'FEED_UNPARSEABLE',
       `${source}: expected version/url/sha512 fields, found version=${Boolean(version)} url=${Boolean(url)} sha512=${Boolean(sha512)}`,
     );
   }
-  return {
-    version: version[1],
-    url: url[1],
-    sha512: sha512[1],
-    size: size ? Number(size[1]) : null,
-    releaseDate: releaseDate ? releaseDate[1].trim() : null,
-  };
+  return { version, url, sha512, size, releaseDate: releaseDate ?? null };
 }
 
 /** Resolve a feed url field (may be absolute or relative to the feed file). */

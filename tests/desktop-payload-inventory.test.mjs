@@ -38,21 +38,33 @@ function runCli(args) {
   });
 }
 
+// js-yaml folds values past its 80-column wrap into block scalars; the real
+// upstream feeds carry the base64 sha512 this way.
 const FEED_FIXTURE = `version: 0.2.1-rc.3
 files:
   - url: DSH-0.2.1-rc.3-arm64.dmg
-    sha512: AbCdEf1234567890+/==
+    sha512: >-
+      AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234+/==
     size: 104857600
 releaseDate: '2026-10-23T10:00:00.000Z'
 `;
+const FEED_SHA512 =
+  'AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234+/==';
 
 test('parseUpdaterFeed 提取 electron-updater feed 字段', () => {
   const feed = parseUpdaterFeed(FEED_FIXTURE);
   assert.equal(feed.version, '0.2.1-rc.3');
   assert.equal(feed.url, 'DSH-0.2.1-rc.3-arm64.dmg');
-  assert.equal(feed.sha512, 'AbCdEf1234567890+/==');
+  assert.equal(feed.sha512, FEED_SHA512);
   assert.equal(feed.size, 104857600);
   assert.equal(feed.releaseDate, '2026-10-23T10:00:00.000Z');
+});
+
+test('parseUpdaterFeed 字面量块标量（|）同样可解析', () => {
+  const feed = parseUpdaterFeed(`version: 1.2.3\nurl: |\n  https://example.test/app.dmg\nsha512: |-\n  ${FEED_SHA512}\n`);
+  assert.equal(feed.version, '1.2.3');
+  assert.equal(feed.url, 'https://example.test/app.dmg');
+  assert.equal(feed.sha512, FEED_SHA512);
 });
 
 test('parseUpdaterFeed 缺少关键字段时报 FEED_UNPARSEABLE', () => {
