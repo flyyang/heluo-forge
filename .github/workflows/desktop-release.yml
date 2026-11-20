@@ -1,0 +1,173 @@
+name: desktop-release
+
+# Desktop release lane, draft-first skeleton (plan CORP-DSH-PLAN-024 §4.0).
+#
+# A tag is the only input. This lane produces neutral evidence and neutral
+# artifacts only: the official-payload inventory (public feeds probed, no
+# payload bytes downloaded), the brand-derived platform icons, and the public
+# plugin tarball (same builder as release-bundle). The final job attaches
+# everything with a SHA256SUMS to a DRAFT release — publishing stays a human
+# decision. Enterprise configuration is never accepted here; private
+# injection stays on the macOS packaging machine (plan §4.0 item 5).
+#
+# workflow_dispatch on a branch smoke-tests the inventory and icon jobs only;
+# the tarball and draft-release jobs require a tag ref.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  payload-inventory:
+    name: official payload inventory (ubuntu-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Probe official Desktop feeds and fixed latest URLs
+        run: node scripts/desktop-payload-inventory.mjs --output dist/desktop-inventory --timeout-ms 20000
+      - name: Upload the inventory report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-inventory-${{ github.ref_name }}
+          path: dist/desktop-inventory
+          if-no-files-found: error
+          retention-days: 90
+
+  brand-icons:
+    name: brand icon derivation (ubuntu-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install rsvg-convert for missing icon sizes
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin
+      - name: Derive .ico/.icns from the committed brand assets
+        run: node scripts/derive-brand-icons.mjs --output dist/brand-icons
+      - name: Upload the derived brand icons
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: brand-icons-${{ github.ref_name }}
+          path: dist/brand-icons
+          if-no-files-found: error
+          retention-days: 90
+
+  public-tarball:
+    name: public release tarball (ubuntu-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    if: github.ref_type == 'tag'
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          show-progress: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Build and self-verify the public release
+        env:
+          HELUO_PUBLIC_LICENSE: ${{ vars.HELUO_PUBLIC_LICENSE }}
+        run: |
+          if [[ -z "$HELUO_PUBLIC_LICENSE" ]]; then
+            echo 'HELUO_PUBLIC_LICENSE is not set; a public release needs an explicit license decision.' >&2
+            exit 1
+          fi
+          node scripts/build-public-release.mjs --output dist/public --tag "$GITHUB_REF_NAME" --license "$HELUO_PUBLIC_LICENSE"
+          node scripts/verify-enterprise-bundle.mjs "dist/public/heluo-forge-enterprise-"*.tgz --manifest dist/public/bundle-manifest.json
+      - name: Upload the verified tarball directory
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-public-${{ github.ref_name }}
+          path: dist/public
+          if-no-files-found: error
+          retention-days: 90
+
+  draft-release:
+    name: attach artifacts to draft release (ubuntu-x64)
+    needs: [payload-inventory, brand-icons, public-tarball]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write # only this job may create the draft release
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - name: Download the lane artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist/release
+          merge-multiple: true
+      - name: Build the digest manifest
+        run: |
+          cd dist/release
+          find . -type f ! -name SHA256SUMS -print0 | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS
+          cat SHA256SUMS
+      - name: Compose draft release notes
+        run: |
+          DSH_VERSION="$(tr -d '\n' < .dsh-version)"
+          {
+            echo "# 河洛 Forge 桌面发布基线 ${GITHUB_REF_NAME}"
+            echo
+            echo "- 锁定 DSH 版本（.dsh-version）：${DSH_VERSION}"
+            echo "- 产物与 SHA256SUMS 挂草稿；发布前人工核对摘要与离线演练（CORP-DSH-PLAN-024 §4.0）"
+            echo "- 本流水线只产中性制品；私版注入由制包机从本 Release 产物执行"
+            echo
+            echo "## 官方载荷盘点"
+            echo
+            cat dist/release/INVENTORY.md || echo '（inventory 缺失）'
+          } > dist/release-notes.md
+      - name: Attach everything to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -d '' FILES < <(find dist/release -type f -print0 | sort -z)
+          if [[ ${#FILES[@]} -eq 0 ]]; then
+            echo 'No release files found; refusing to create an empty draft.' >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo 'Draft release already exists; refreshing assets.'
+            gh release upload "$GITHUB_REF_NAME" "${FILES[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file dist/release-notes.md \
+              "${FILES[@]}"
+          fi
