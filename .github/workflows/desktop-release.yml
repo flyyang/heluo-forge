@@ -112,6 +112,72 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  # Official-payload lanes below embed the official installers byte-for-byte.
+  # They run on tags only (heavy downloads) and upload WORKFLOW ARTIFACTS ONLY —
+  # attaching official payloads to any release waits for the P0 license ruling
+  # (CORP-DSH-PLAN-024 §3 #2: no bundle distribution before that conclusion).
+  macos-bundle:
+    name: macos bundle zip (ubuntu-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: github.ref_type == 'tag'
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install zip
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zip
+      - name: Assemble the neutral macOS bundle (official dmg byte-identical)
+        run: node scripts/build-desktop-bundle.mjs --output dist/desktop-bundle --timeout-ms 300000
+      - name: Upload the macOS bundle as a workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-bundle-${{ github.ref_name }}
+          path: dist/desktop-bundle
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-installer:
+    name: windows outer nsis (ubuntu-x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: github.ref_type == 'tag'
+    needs: brand-icons
+    steps:
+      - name: Checkout the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install NSIS
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nsis
+      - name: Download the derived brand icons
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: brand-icons-${{ github.ref_name }}
+          path: dist/brand-icons
+      - name: Generate and compile the outer installer
+        run: node scripts/build-windows-installer.mjs --output dist/windows-installer --icon dist/brand-icons/app-icon.ico --timeout-ms 300000
+      - name: Upload the outer installer as a workflow artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-installer-${{ github.ref_name }}
+          path: dist/windows-installer
+          if-no-files-found: error
+          retention-days: 14
+
   draft-release:
     name: attach artifacts to draft release (ubuntu-x64)
     needs: [payload-inventory, brand-icons, public-tarball]
@@ -129,6 +195,9 @@ jobs:
       - name: Download the lane artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          # Neutral lanes only: artifacts that embed official payloads stay
+          # workflow artifacts until the P0 license ruling.
+          pattern: '{desktop-inventory-*,brand-icons-*,desktop-public-*}'
           path: dist/release
           merge-multiple: true
       - name: Build the digest manifest
