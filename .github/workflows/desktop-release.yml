@@ -117,10 +117,14 @@ jobs:
   # attaching official payloads to any release waits for the P0 license ruling
   # (CORP-DSH-PLAN-024 §3 #2: no bundle distribution before that conclusion).
   macos-bundle:
-    name: macos bundle zip (ubuntu-x64)
+    name: macos bundle zip - ${{ matrix.target }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     if: github.ref_type == 'tag'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [mac-arm64, mac-x64]
     steps:
       - name: Checkout the tagged commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,7 +146,7 @@ jobs:
           # (FETCH_FAILED) therefore parks this lane as BLOCKED evidence; any
           # digest mismatch still fails the pipeline.
           set +e
-          node scripts/build-desktop-bundle.mjs --output dist/desktop-bundle --timeout-ms 300000
+          node scripts/build-desktop-bundle.mjs --targets ${{ matrix.target }} --output dist/desktop-bundle --timeout-ms 300000
           code=$?
           set -e
           if [[ $code -eq 4 ]]; then
@@ -162,7 +166,7 @@ jobs:
       - name: Upload the macOS bundle as a workflow artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: macos-bundle-${{ github.ref_name }}
+          name: macos-bundle-${{ matrix.target }}-${{ github.ref_name }}
           path: dist/desktop-bundle
           if-no-files-found: error
           retention-days: 14
