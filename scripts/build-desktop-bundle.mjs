@@ -13,8 +13,12 @@
  *
  * 用法：
  *   node scripts/build-desktop-bundle.mjs [--targets mac-arm64,mac-x64]
- *     [--origin URL] [--output DIR] [--mac-form zip|dmg|both] [--offline-manifest FILE]
- *     [--json] [--repo-root DIR]
+ *     [--origin URL] [--output DIR] [--mac-form zip|dmg|both] [--archive-zips DIR]
+ *     [--offline-manifest FILE] [--json] [--repo-root DIR]
+ *
+ * 默认按架构分包（每目标一个 zip，员工只下载本机架构）且交付形态只留
+ * dmg；feed zip 的对账记录写入 zipAttestation，字节级留档由制包机
+ * --archive-zips 执行（交付物不含 zip 字节）。
  *
  * --offline-manifest 指向 JSON 数组（{target, version, sha512, url, file}），
  * 全部载荷从本地文件读取，供离线测试与内部镜像使用。
@@ -24,7 +28,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -141,7 +145,7 @@ export function verifyLocalPayload(payload, bytes) {
 }
 
 /** Branded first-launch guide; uncertain behaviors stay marked as probes. */
-export function renderInstallMd({ payloads, generatedAt }) {
+export function renderInstallMd({ payloads, generatedAt, attestation = null }) {
   const rows = payloads
     .map((payload) => {
       if (payload.kind === 'dmg') {
@@ -152,6 +156,17 @@ export function renderInstallMd({ payloads, generatedAt }) {
         '），原样字节且与 feed 声明 sha512 一致，SHA-256 见 SHA256SUMS';
     })
     .join('\n');
+  const attestationLines = attestation
+    ? [
+        '## 对账（feed 声明）',
+        '',
+        '- zip 形态声明 sha512：' + attestation.declaredSha512 + '（版本 ' + attestation.version + '）',
+        attestation.verifiedHere
+          ? '- 已在本机下载核验并留档：' + (attestation.archivedAt ?? '（见运行日志）')
+          : '- 字节级核验由制包机 --archive-zips 留档执行（feed 声明值持续由盘点 job 记录）',
+        '',
+      ]
+    : [];
   return [
     '# 河洛 Forge 企业版 · macOS 成套包（中性基线）',
     '',
@@ -164,6 +179,7 @@ export function renderInstallMd({ payloads, generatedAt }) {
     '- `desktop-payloads.json` — 官方载荷来源与摘要记录',
     '- `SHA256SUMS` — 全部文件摘要',
     '',
+    ...attestationLines,
     '## 安装三步',
     '',
     '1. 双击挂载对应架构的 dmg，将应用拖入「应用程序」。Apple Silicon 选 arm64，Intel 选 x64；仅有 zip 形态时解压后拖入。',
@@ -182,7 +198,7 @@ export function renderInstallMd({ payloads, generatedAt }) {
   ].join('\n');
 }
 
-export function buildStaging({ stagingDir, payloads, now = () => new Date(), renderInstall = renderInstallMd }) {
+export function buildStaging({ stagingDir, payloads, zipAttestation = null, now = () => new Date(), renderInstall = renderInstallMd }) {
   mkdirSync(join(stagingDir, 'payload'), { recursive: true });
   const records = [];
   for (const payload of payloads) {
@@ -208,11 +224,12 @@ export function buildStaging({ stagingDir, payloads, now = () => new Date(), ren
     tool: TOOL_NAME,
     generatedAt,
     payloads: records,
+    zipAttestation,
   };
   writeFileSync(join(stagingDir, 'desktop-payloads.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   writeFileSync(
     join(stagingDir, 'INSTALL.md'),
-    renderInstall({ payloads: records, generatedAt }),
+    renderInstall({ payloads: records, generatedAt, attestation: zipAttestation }),
   );
   const sums = [];
   const walk = (dir) => {
@@ -242,6 +259,8 @@ function usage() {
     '  --targets <a,b>        目标（默认 mac-arm64,mac-x64；可用 mac-arm64/mac-x64/win-x64）',
     '  --origin <url>         下载源（默认 https://download.deepseek.com）',
     '  --output <dir>         输出目录（默认 dist/desktop-bundle）',
+    '  --mac-form <form>      dmg（默认，交付只留 dmg）| zip | both',
+    '  --archive-zips <dir>   dmg 模式下把 feed zip 下载核验后留档到本目录（不进交付物）',
     '  --offline-manifest <f> 本地载荷清单 JSON（[{target,version,sha512,url,file}]）',
     '  --timeout-ms <n>       单请求超时（默认 120000）',
     '  --json                 打印 desktop-payloads.json 到 stdout',
@@ -255,7 +274,7 @@ function parseArgs(argv) {
     origin: 'https://download.deepseek.com',
     output: null,
     offlineManifest: null,
-    macForm: 'both',
+    macForm: 'dmg',
     timeoutMs: 120_000,
     json: false,
     repoRoot: null,
@@ -272,6 +291,7 @@ function parseArgs(argv) {
       case '--origin': options.origin = next(); break;
       case '--output': options.output = next(); break;
       case '--offline-manifest': options.offlineManifest = next(); break;
+      case '--archive-zips': options.archiveZips = next(); break;
       case '--mac-form': {
         const value = next();
         if (!['zip', 'dmg', 'both'].includes(value)) throw new BundleError('INVALID', '--mac-form 仅支持 zip/dmg/both');
@@ -320,7 +340,11 @@ export async function main(argv) {
   const targetList = options.targets.split(',').map((value) => value.trim()).filter(Boolean);
 
   try {
-    const payloads = [];
+    const feedInfos = [];
+    const perTarget = new Map();
+    const archiveDir = options.archiveZips
+      ? (isAbsolute(options.archiveZips) ? options.archiveZips : resolve(repoRoot, options.archiveZips))
+      : null;
     if (options.offlineManifest) {
       const manifestPath = resolve(options.offlineManifest);
       const entries = JSON.parse(readFileSync(manifestPath, 'utf8'));
@@ -328,37 +352,61 @@ export async function main(argv) {
       for (const entry of entries) {
         const filePath = resolve(dirnameOf(manifestPath), entry.file);
         if (!existsSync(filePath)) throw new BundleError('INVALID', `载荷文件不存在：${filePath}`);
-        payloads.push({ ...entry, bytes: verifyLocalPayload(entry, readFileSync(filePath)) });
+        const verified = { ...entry, kind: entry.kind ?? 'dmg', bytes: verifyLocalPayload(entry, readFileSync(filePath)) };
+        perTarget.set(entry.target, [...(perTarget.get(entry.target) ?? []), verified]);
       }
     } else {
       for (const target of targetList) {
-        if (target.startsWith('mac-') && options.macForm === 'dmg') {
-          const dmg = await fetchLatestDmg({ origin: options.origin, target, fetchImpl: defaultFetch, timeoutMs: options.timeoutMs });
-          process.stdout.write('[heluo] ' + target + ': 下载 latest dmg（' + dmg.bytes.length + ' 字节，上游未声明摘要，自算存证）\n');
-          payloads.push(dmg);
-          continue;
-        }
+        const feedInfo = await resolveFeedPayload({ origin: options.origin, target, fetchImpl: defaultFetch, timeoutMs: options.timeoutMs });
+        feedInfos.push(feedInfo);
+        const payloads = [];
         if (target.startsWith('mac-') && options.macForm !== 'zip') {
           const dmg = await fetchLatestDmg({ origin: options.origin, target, fetchImpl: defaultFetch, timeoutMs: options.timeoutMs });
           payloads.push(dmg);
-          process.stdout.write(`[heluo] ${target}: latest dmg ${dmg.bytes.length} 字节已存证\n`);
+          process.stdout.write('[heluo] ' + target + ': latest dmg ' + dmg.bytes.length + ' 字节已存证（上游未声明摘要，自算）\n');
         }
-        const payload = await resolveFeedPayload({ origin: options.origin, target, fetchImpl: defaultFetch, timeoutMs: options.timeoutMs });
-        process.stdout.write(`[heluo] ${target}: 下载 ${payload.version}（${payload.url}）\n`);
-        payloads.push({ ...payload, digestSource: 'feed', bytes: await downloadAndVerify(payload, defaultFetch, options.timeoutMs) });
+        if (!target.startsWith('mac-') || options.macForm !== 'dmg') {
+          // 交付形态含 zip（zip/both）或非 mac 目标：字节进包、与声明比对
+          process.stdout.write('[heluo] ' + target + ': 下载 ' + feedInfo.version + '（' + feedInfo.url + '）\n');
+          payloads.push({ ...feedInfo, digestSource: 'feed', bytes: await downloadAndVerify(feedInfo, defaultFetch, options.timeoutMs) });
+        } else if (archiveDir) {
+          // dmg 交付 + 制包机留档：下载 feed zip 核验后只落本地档案，不进交付物
+          const bytes = await downloadAndVerify(feedInfo, defaultFetch, options.timeoutMs);
+          mkdirSync(archiveDir, { recursive: true });
+          const archiveName = feedInfo.url.split('/').pop();
+          writeFileSync(join(archiveDir, archiveName), bytes);
+          process.stdout.write('[heluo] ' + target + ': zip 对账通过并留档 ' + join(archiveDir, archiveName) + '\n');
+        }
+        perTarget.set(target, payloads);
       }
     }
-    const stagingDir = join(outputDir, 'staging');
-    mkdirSync(stagingDir, { recursive: true });
-    const manifest = buildStaging({ stagingDir, payloads });
-    const versions = [...new Set(manifest.payloads.filter((payload) => payload.version !== 'latest').map((payload) => payload.version))];
-    const zipName = `heluo-desktop-${targetList.join('+')}-${versions.join('+')}.zip`;
-    const zipPath = join(outputDir, zipName);
-    zipDir(stagingDir, zipPath);
-    if (options.json) process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
-    process.stdout.write(`[heluo] macOS 成套包完成：${zipPath}\n`);
-    if (versions.length > 1) {
-      process.stdout.write(`[heluo] WARN 多目标版本不一致：${versions.join(' / ')}（分发前需收敛或分别交付）\n`);
+
+    for (const [target, payloads] of perTarget) {
+      const feedInfo = feedInfos.find((info) => info.target === target) ?? null;
+      const stagingDir = join(outputDir, target, 'staging');
+      mkdirSync(stagingDir, { recursive: true });
+      const zipAttestation = feedInfo
+        ? {
+            kind: 'zip-feed',
+            version: feedInfo.version,
+            url: feedInfo.url,
+            declaredSha512: feedInfo.sha512,
+            size: feedInfo.size,
+            verifiedHere: archiveDir != null || options.offlineManifest != null,
+            archivedAt: archiveDir ? archiveDir : null,
+          }
+        : null;
+      const manifest = buildStaging({ stagingDir, payloads, zipAttestation });
+      const displayVersion = payloads.find((payload) => payload.version !== 'latest')?.version
+        ?? payloads[0]?.version ?? 'unknown';
+      const zipPath = join(outputDir, target, 'heluo-desktop-' + target + '-' + displayVersion + '.zip');
+      zipDir(stagingDir, zipPath);
+      if (options.json) process.stdout.write(JSON.stringify(manifest, null, 2) + '\n');
+      process.stdout.write('[heluo] ' + target + ' 成套包完成：' + zipPath + '\n');
+    }
+    const macVersions = feedInfos.filter((info) => info.target.startsWith('mac-')).map((info) => info.version);
+    if (new Set(macVersions).size > 1) {
+      process.stdout.write('[heluo] WARN 多目标版本不一致：' + [...new Set(macVersions)].join(' / ') + '（分发前需收敛或分别交付）\n');
     }
     return 0;
   } catch (error) {

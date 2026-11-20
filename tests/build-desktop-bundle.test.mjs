@@ -165,3 +165,30 @@ test('CLI 端到端（offline 清单）：退出 0 并产出 zip；篡改退出 
   assert.equal(bad.status, 3);
   assert.match(bad.stderr, /PAYLOAD_MISMATCH/);
 });
+
+test('CLI 分包：双目标各自成包（按架构独立 zip 与 staging）', (t) => {
+  const root = tempRoot(t);
+  const arm64 = fakePayload('mac-arm64');
+  const x64 = fakePayload('mac-x64');
+  writeFileSync(join(root, 'arm64.dmg'), arm64.bytes);
+  writeFileSync(join(root, 'x64.dmg'), x64.bytes);
+  const manifest = [
+    { target: 'mac-arm64', version: arm64.version, url: arm64.url, sha512: arm64.sha512, file: 'arm64.dmg' },
+    { target: 'mac-x64', version: x64.version, url: x64.url, sha512: x64.sha512, file: 'x64.dmg' },
+  ];
+  writeFileSync(join(root, 'offline.json'), JSON.stringify(manifest));
+
+  const result = spawnSync(
+    process.execPath,
+    [SCRIPT, '--offline-manifest', join(root, 'offline.json'), '--output', join(root, 'out')],
+    { encoding: 'utf8' },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(existsSync(join(root, 'out/mac-arm64/heluo-desktop-mac-arm64-0.2.1-rc.3.zip')));
+  assert.ok(existsSync(join(root, 'out/mac-x64/heluo-desktop-mac-x64-0.2.1-rc.3.zip')));
+  // 每个包只含本架构载荷：对侧 dmg 不在包内
+  const arm64Zip = join(root, 'out/mac-arm64/heluo-desktop-mac-arm64-0.2.1-rc.3.zip');
+  const listing = spawnSync('unzip', ['-l', arm64Zip], { encoding: 'utf8' });
+  assert.match(listing.stdout, /dsh-desktop-mac-arm64-0\.2\.1-rc\.3\.dmg/);
+  assert.doesNotMatch(listing.stdout, /mac-x64/);
+});
