@@ -25,7 +25,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { TARGETS, parseUpdaterFeed, resolveBinaryUrl } from './desktop-payload-inventory.mjs';
@@ -274,7 +274,7 @@ export async function main(argv) {
     process.stdout.write(`${usage()}\n`);
     return 0;
   }
-  const repoRoot = resolve(options.repoRoot ?? join(fileURLToPath(new URL('.', import.meta.url)), '..', '..'));
+  const repoRoot = resolve(options.repoRoot ?? dirname(dirname(fileURLToPath(import.meta.url))));
   const outputDir = isAbsolute(options.output ?? '') ? options.output : resolve(repoRoot, options.output ?? 'dist/desktop-bundle');
   const targetList = options.targets.split(',').map((value) => value.trim()).filter(Boolean);
 
