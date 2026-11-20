@@ -39,23 +39,30 @@ function runCli(args) {
 }
 
 // js-yaml folds values past its 80-column wrap into block scalars; the real
-// upstream feeds carry the base64 sha512 this way.
-const FEED_FIXTURE = `version: 0.2.1-rc.3
-files:
-  - url: DSH-0.2.1-rc.3-arm64.dmg
-    sha512: >-
-      AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234+/==
-    size: 104857600
-releaseDate: '2026-10-23T10:00:00.000Z'
-`;
+// upstream feeds carry url and sha512 this way, bulleted under `files:` with
+// sibling keys at the same column that must terminate the block.
 const FEED_SHA512 =
   'AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234567890AbCdEf1234+/==';
+const FEED_URL = 'https://download.example.test/dsh-desk/bin/mac-arm64/DSH-0.2.1-rc.3-arm64.zip';
+const FEED_FIXTURE = `version: 0.2.1-rc.3
+files:
+  - url: >-
+      ${FEED_URL}
+    size: 104857600
+    sha512: >-
+      ${FEED_SHA512}
+path: >-
+  ${FEED_URL}
+releaseDate: '2026-10-23T10:00:00.000Z'
+`;
 
-test('parseUpdaterFeed 提取 electron-updater feed 字段', () => {
+test('parseUpdaterFeed 提取 electron-updater feed 字段（块标量不吞兄弟键）', () => {
   const feed = parseUpdaterFeed(FEED_FIXTURE);
   assert.equal(feed.version, '0.2.1-rc.3');
-  assert.equal(feed.url, 'DSH-0.2.1-rc.3-arm64.dmg');
+  assert.equal(feed.url, FEED_URL);
+  assert.ok(!feed.url.includes('size'), 'url 不得吞并兄弟键');
   assert.equal(feed.sha512, FEED_SHA512);
+  assert.ok(!feed.sha512.includes('path'), 'sha512 不得吞并后续键');
   assert.equal(feed.size, 104857600);
   assert.equal(feed.releaseDate, '2026-10-23T10:00:00.000Z');
 });

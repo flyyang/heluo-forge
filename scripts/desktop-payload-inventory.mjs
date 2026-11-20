@@ -55,7 +55,12 @@ export class InventoryError extends Error {
 export function parseUpdaterFeed(text, source = 'feed') {
   const lines = text.split(/\r?\n/u);
   const unfoldBlockScalar = (startIndex, indicator) => {
-    const keyIndent = /^\s*/u.exec(lines[startIndex])[0].length;
+    // The continuation baseline is the column of the KEY token, not the raw
+    // line start: under a `- ` bullet the key sits two columns in, so sibling
+    // keys at the same column must terminate the block (real feeds put url in
+    // a bulleted block scalar followed by sibling size/sha512 keys).
+    const leader = /^(\s*(?:-\s*)?)/u.exec(lines[startIndex])[0];
+    const keyIndent = leader.length;
     const parts = [];
     for (let index = startIndex + 1; index < lines.length; index += 1) {
       const line = lines[index];

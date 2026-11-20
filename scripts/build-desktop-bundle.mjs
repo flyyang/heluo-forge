@@ -49,7 +49,7 @@ export async function resolveFeedPayload({ origin, target, fetchImpl, timeoutMs 
   const spec = TARGETS.find((candidate) => candidate.target === target);
   if (!spec) throw new BundleError('INVALID', `未知目标 ${target}（可用：${TARGETS.map((t) => t.target).join(', ')}）`);
   const feedPath = `dsh-desk/feeds/${spec.target}/${spec.feed}`;
-  const response = await fetchImpl(`${origin.replace(/\/$/u, '')}/${feedPath}`, timeoutMs);
+  const response = await fetchWithRetry(`${origin.replace(/\/$/u, '')}/${feedPath}`, timeoutMs, { fetchImpl });
   if (!response.ok) throw new BundleError('FETCH_FAILED', `${target}: feed HTTP ${response.status}`);
   const feed = parseUpdaterFeed(await response.text(), feedPath);
   return {
@@ -62,9 +62,39 @@ export async function resolveFeedPayload({ origin, target, fetchImpl, timeoutMs 
   };
 }
 
+/**
+ * Fetch with retry: the official CDN has replication windows where a feed
+ * already advertises a binary URL that some edges still answer with 404
+ * (observed 2026-11-20 on GitHub runners and the maker machine alike).
+ * Network errors, 404 and 5xx are retried with linear backoff.
+ */
+export async function fetchWithRetry(url, timeoutMs, { attempts = 3, backoffMs = 5_000, fetchImpl = null } = {}) {
+  const doFetch = fetchImpl ?? (async (target, timeout) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      return await fetch(target, { signal: controller.signal, redirect: 'follow' });
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+  let lastStatus = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await doFetch(url, timeoutMs);
+      if (response.ok || (response.status !== 404 && response.status < 500)) return response;
+      lastStatus = response.status;
+    } catch (error) {
+      lastStatus = `network:${error.name}`;
+    }
+    if (attempt < attempts) await new Promise((resolvePromise) => setTimeout(resolvePromise, backoffMs * attempt));
+  }
+  throw new BundleError('FETCH_FAILED', `${url}: 重试 ${attempts} 次后仍不可达（${lastStatus}；可能为 CDN 复制空窗或访问限制）`);
+}
+
 /** Download the payload bytes and verify them against the declared sha512. */
 export async function downloadAndVerify(payload, fetchImpl, timeoutMs) {
-  const response = await fetchImpl(payload.url, timeoutMs);
+  const response = await fetchWithRetry(payload.url, timeoutMs, { fetchImpl });
   if (!response.ok) throw new BundleError('FETCH_FAILED', `${payload.target}: payload HTTP ${response.status}`);
   const bytes = Buffer.from(await response.arrayBuffer());
   const digest = sha512Base64(bytes);

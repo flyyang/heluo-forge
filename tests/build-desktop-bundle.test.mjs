@@ -37,6 +37,24 @@ test('sha512 校验：一致通过，篡改报 PAYLOAD_MISMATCH', () => {
   assert.throws(() => verifyLocalPayload(tampered, tampered.bytes), (error) => error instanceof BundleError && error.code === 'PAYLOAD_MISMATCH');
 });
 
+test('fetchWithRetry：404 后恢复则成功，持续 404 报 FETCH_FAILED', async () => {
+  const { fetchWithRetry } = await import('../scripts/build-desktop-bundle.mjs');
+  let calls = 0;
+  const flaky = async () => {
+    calls += 1;
+    return calls >= 3 ? new Response('ok', { status: 200 }) : new Response('x', { status: 404 });
+  };
+  const recovered = await fetchWithRetry('https://example.test/a', 1000, { attempts: 3, backoffMs: 1, fetchImpl: flaky });
+  assert.equal(recovered.status, 200);
+  assert.equal(calls, 3);
+
+  const dead = async () => new Response('x', { status: 404 });
+  await assert.rejects(
+    () => fetchWithRetry('https://example.test/b', 1000, { attempts: 2, backoffMs: 1, fetchImpl: dead }),
+    (error) => error.code === 'FETCH_FAILED' && /CDN 复制空窗/.test(error.message),
+  );
+});
+
 test('downloadAndVerify：HTTP 失败与大小不符均拒绝', async () => {
   const fetchFail = async () => new Response('x', { status: 503 });
   const payload = fakePayload('mac-x64');

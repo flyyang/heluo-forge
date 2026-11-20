@@ -135,7 +135,28 @@ jobs:
       - name: Install zip
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zip
       - name: Assemble the neutral macOS bundle (official dmg byte-identical)
-        run: node scripts/build-desktop-bundle.mjs --output dist/desktop-bundle --timeout-ms 300000
+        run: |
+          # Reachability is a recorded blocker, not a pipeline failure: the
+          # official download origin answers 404 to GitHub runner IPs while
+          # the macOS packaging machine downloads the same URLs fine. Exit 4
+          # (FETCH_FAILED) therefore parks this lane as BLOCKED evidence; any
+          # digest mismatch still fails the pipeline.
+          set +e
+          node scripts/build-desktop-bundle.mjs --output dist/desktop-bundle --timeout-ms 300000
+          code=$?
+          set -e
+          if [[ $code -eq 4 ]]; then
+            mkdir -p dist/desktop-bundle
+            {
+              echo '# BLOCKED: 官方载荷下载不可达（runner IP 404）'
+              echo
+              echo '- feed 可达、bin 载荷 404：官方下载源对 GitHub runner IP 存在访问限制（2026-11-20 实测）'
+              echo '- 预批准兜底：制包机（macOS，国内出口）组装，脚本与本 job 相同'
+              echo '- 本 lane 不产出成套包；中性 lane 与 draft Release 不受影响'
+            } > dist/desktop-bundle/BLOCKED.md
+            exit 0
+          fi
+          exit "$code"
       - name: Upload the macOS bundle as a workflow artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -169,7 +190,25 @@ jobs:
           name: brand-icons-${{ github.ref_name }}
           path: dist/brand-icons
       - name: Generate and compile the outer installer
-        run: node scripts/build-windows-installer.mjs --output dist/windows-installer --icon dist/brand-icons/app-icon.ico --timeout-ms 300000
+        run: |
+          # Same reachability blocker as the macOS lane: 404 to runner IPs is
+          # BLOCKED evidence (maker-machine fallback is pre-approved); digest
+          # mismatches still fail hard.
+          set +e
+          node scripts/build-windows-installer.mjs --output dist/windows-installer --icon dist/brand-icons/app-icon.ico --timeout-ms 300000
+          code=$?
+          set -e
+          if [[ $code -eq 4 ]]; then
+            mkdir -p dist/windows-installer
+            {
+              echo '# BLOCKED: 官方载荷下载不可达（runner IP 404）'
+              echo
+              echo '- feed 可达、官方 exe 404：官方下载源对 GitHub runner IP 存在访问限制（2026-11-20 实测）'
+              echo '- 预批准兜底：制包机 makensis 离线构建（计划 §4.3）'
+            } > dist/windows-installer/BLOCKED.md
+            exit 0
+          fi
+          exit "$code"
       - name: Upload the outer installer as a workflow artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
