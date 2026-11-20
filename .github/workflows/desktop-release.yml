@@ -157,6 +157,8 @@ jobs:
             exit 0
           fi
           exit "$code"
+      - name: Drop the staging copy (the bundle zip already carries every byte)
+        run: rm -rf dist/desktop-bundle/staging
       - name: Upload the macOS bundle as a workflow artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -209,6 +211,8 @@ jobs:
             exit 0
           fi
           exit "$code"
+      - name: Drop the embedded payload copy (Setup.exe already carries it)
+        run: rm -rf dist/windows-installer/staging/payload
       - name: Upload the outer installer as a workflow artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
