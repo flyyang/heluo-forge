@@ -117,6 +117,31 @@ test('buildStaging + zipDir：暂存布局、摘要清单与 zip 产物', (t) =>
   assert.match(listing.stdout, /desktop-payloads\.json/);
 });
 
+test('latest dmg 形态：latest 文件名、存证标记与 INSTALL 措辞', (t) => {
+  const root = tempRoot(t);
+  const bytes = Buffer.from('fake-latest-dmg');
+  const payload = {
+    target: 'mac-arm64',
+    kind: 'dmg',
+    version: 'latest',
+    url: 'https://example.test/desktop/dsh-latest-macos-arm64.dmg',
+    sha512: sha512Base64(bytes),
+    size: bytes.length,
+    digestSource: 'self',
+    versionUncertified: true,
+    bytes,
+  };
+  const manifest = buildStaging({ stagingDir: join(root, 'staging'), payloads: [payload], now: () => new Date('2026-11-20T00:00:00Z') });
+  const record = manifest.payloads[0];
+  assert.equal(record.fileName, 'payload/dsh-desktop-mac-arm64-latest.dmg');
+  assert.equal(record.digestSource, 'self');
+  assert.equal(record.versionUncertified, true);
+  const markdown = readFileSync(join(root, 'staging/INSTALL.md'), 'utf8');
+  assert.match(markdown, /安装镜像/);
+  assert.match(markdown, /版本待挂载核验/);
+  assert.match(markdown, /仅有 zip 形态时解压后拖入/);
+});
+
 test('CLI 端到端（offline 清单）：退出 0 并产出 zip；篡改退出 3', (t) => {
   const root = tempRoot(t);
   const arm64 = fakePayload('mac-arm64');

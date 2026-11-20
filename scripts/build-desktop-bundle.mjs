@@ -13,8 +13,8 @@
  *
  * 用法：
  *   node scripts/build-desktop-bundle.mjs [--targets mac-arm64,mac-x64]
- *     [--origin URL] [--output DIR] [--offline-manifest FILE] [--json]
- *     [--repo-root DIR]
+ *     [--origin URL] [--output DIR] [--mac-form zip|dmg|both] [--offline-manifest FILE]
+ *     [--json] [--repo-root DIR]
  *
  * --offline-manifest 指向 JSON 数组（{target, version, sha512, url, file}），
  * 全部载荷从本地文件读取，供离线测试与内部镜像使用。
@@ -92,6 +92,31 @@ export async function fetchWithRetry(url, timeoutMs, { attempts = 3, backoffMs =
   throw new BundleError('FETCH_FAILED', `${url}: 重试 ${attempts} 次后仍不可达（${lastStatus}；可能为 CDN 复制空窗或访问限制）`);
 }
 
+/**
+ * Fetch the fixed-latest official dmg. Upstream declares no digest and no
+ * version for it (only the feed's zip carries a declared sha512), so the
+ * digest is self-computed for the record and the version stays uncertified
+ * until a packaging-machine mount probe (hdiutil) says otherwise.
+ */
+export async function fetchLatestDmg({ origin, target, fetchImpl, timeoutMs }) {
+  const spec = TARGETS.find((candidate) => candidate.target === target);
+  const url = `${origin.replace(/\/$/u, '')}/desktop/${spec.latest}`;
+  const response = await fetchWithRetry(url, timeoutMs, { fetchImpl });
+  if (!response.ok) throw new BundleError('FETCH_FAILED', `${target}: latest dmg HTTP ${response.status}`);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  return {
+    target,
+    kind: 'dmg',
+    version: 'latest',
+    url,
+    sha512: sha512Base64(bytes),
+    size: bytes.length,
+    digestSource: 'self',
+    versionUncertified: true,
+    bytes,
+  };
+}
+
 /** Download the payload bytes and verify them against the declared sha512. */
 export async function downloadAndVerify(payload, fetchImpl, timeoutMs) {
   const response = await fetchWithRetry(payload.url, timeoutMs, { fetchImpl });
@@ -118,7 +143,14 @@ export function verifyLocalPayload(payload, bytes) {
 /** Branded first-launch guide; uncertain behaviors stay marked as probes. */
 export function renderInstallMd({ payloads, generatedAt }) {
   const rows = payloads
-    .map((payload) => `- \`${payload.fileName}\` — 官方 DSH Desktop ${payload.version}（${payload.target}），原样字节，SHA-256 见 SHA256SUMS`)
+    .map((payload) => {
+      if (payload.kind === 'dmg') {
+        return '- `' + payload.fileName + '` — 官方 DSH Desktop 安装镜像（' + payload.target +
+          '，latest 固定 URL；上游未声明摘要，SHA-256 见 SHA256SUMS；版本待挂载核验）';
+      }
+      return '- `' + payload.fileName + '` — 官方 DSH Desktop ' + payload.version + '（' + payload.target +
+        '），原样字节且与 feed 声明 sha512 一致，SHA-256 见 SHA256SUMS';
+    })
     .join('\n');
   return [
     '# 河洛 Forge 企业版 · macOS 成套包（中性基线）',
@@ -134,7 +166,7 @@ export function renderInstallMd({ payloads, generatedAt }) {
     '',
     '## 安装三步',
     '',
-    '1. 双击挂载对应架构的 dmg，将应用拖入「应用程序」。Apple Silicon 选 arm64，Intel 选 x64。',
+    '1. 双击挂载对应架构的 dmg，将应用拖入「应用程序」。Apple Silicon 选 arm64，Intel 选 x64；仅有 zip 形态时解压后拖入。',
     '2. 首次打开如遇 Gatekeeper 提示，按 Apple 官方指引处理（右键 → 打开，或系统设置 → 隐私与安全性 → 仍要打开）。**外层材料未签名，首开实际表现待 P3 实测后回填图文。**',
     '3. 运行随包初始化脚本安装企业插件与默认配置（私版注入后提供）；插件挂载在应用内「设置 → 插件」确认。',
     '',
@@ -166,6 +198,8 @@ export function buildStaging({ stagingDir, payloads, now = () => new Date(), ren
       sha256: createHash('sha256').update(payload.bytes).digest('hex'),
       sourceUrl: payload.url,
       sourceSha512: payload.sha512,
+      digestSource: payload.digestSource ?? 'feed',
+      versionUncertified: payload.versionUncertified === true,
     });
   }
   const generatedAt = now().toISOString();
@@ -221,6 +255,7 @@ function parseArgs(argv) {
     origin: 'https://download.deepseek.com',
     output: null,
     offlineManifest: null,
+    macForm: 'both',
     timeoutMs: 120_000,
     json: false,
     repoRoot: null,
@@ -237,6 +272,12 @@ function parseArgs(argv) {
       case '--origin': options.origin = next(); break;
       case '--output': options.output = next(); break;
       case '--offline-manifest': options.offlineManifest = next(); break;
+      case '--mac-form': {
+        const value = next();
+        if (!['zip', 'dmg', 'both'].includes(value)) throw new BundleError('INVALID', '--mac-form 仅支持 zip/dmg/both');
+        options.macForm = value;
+        break;
+      }
       case '--timeout-ms': {
         const value = Number(next());
         if (!Number.isInteger(value) || value <= 0) throw new BundleError('INVALID', '--timeout-ms 需为正整数');
@@ -291,15 +332,26 @@ export async function main(argv) {
       }
     } else {
       for (const target of targetList) {
+        if (target.startsWith('mac-') && options.macForm === 'dmg') {
+          const dmg = await fetchLatestDmg({ origin: options.origin, target, fetchImpl: defaultFetch, timeoutMs: options.timeoutMs });
+          process.stdout.write('[heluo] ' + target + ': 下载 latest dmg（' + dmg.bytes.length + ' 字节，上游未声明摘要，自算存证）\n');
+          payloads.push(dmg);
+          continue;
+        }
+        if (target.startsWith('mac-') && options.macForm !== 'zip') {
+          const dmg = await fetchLatestDmg({ origin: options.origin, target, fetchImpl: defaultFetch, timeoutMs: options.timeoutMs });
+          payloads.push(dmg);
+          process.stdout.write(`[heluo] ${target}: latest dmg ${dmg.bytes.length} 字节已存证\n`);
+        }
         const payload = await resolveFeedPayload({ origin: options.origin, target, fetchImpl: defaultFetch, timeoutMs: options.timeoutMs });
         process.stdout.write(`[heluo] ${target}: 下载 ${payload.version}（${payload.url}）\n`);
-        payloads.push({ ...payload, bytes: await downloadAndVerify(payload, defaultFetch, options.timeoutMs) });
+        payloads.push({ ...payload, digestSource: 'feed', bytes: await downloadAndVerify(payload, defaultFetch, options.timeoutMs) });
       }
     }
     const stagingDir = join(outputDir, 'staging');
     mkdirSync(stagingDir, { recursive: true });
     const manifest = buildStaging({ stagingDir, payloads });
-    const versions = [...new Set(manifest.payloads.map((payload) => payload.version))];
+    const versions = [...new Set(manifest.payloads.filter((payload) => payload.version !== 'latest').map((payload) => payload.version))];
     const zipName = `heluo-desktop-${targetList.join('+')}-${versions.join('+')}.zip`;
     const zipPath = join(outputDir, zipName);
     zipDir(stagingDir, zipPath);
